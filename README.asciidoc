@@ -1,3 +1,10 @@
+
+== Recent enhancements
+
+- *Tab selection dashboard*: The built-in `select_tab` action now supports icons, per-tab idle timers, MRU/frequency sorting, keyboard navigation, and quick close/notification workflows for large tab sets. See `kitty-context.md` for the full feature overview.
+- *Font cache telemetry*: Run `kitty @ cache-stats` to inspect glyph atlas usage (total sprites, byte estimates, per-font-group stats) when debugging GPU memory usage.
+- *Developer workflow helpers*: `build-release.sh` automates fetching/updating from `master`, cleaning the tree, and producing an optimized release build; `tools/focus_notify_demo.py` demonstrates the notification hooks used by the enhanced tab UI.
+
 = kitty - the fast, feature-rich, cross-platform, GPU based terminal
 
 If you live in the terminal, *kitty* is made for **you**!

@@ -1202,6 +1202,12 @@ class TabManager:  # {{{
         if for_keep_focus and len(h) > 2 and h[-2] == for_keep_focus.id and h[-1] != for_keep_focus.id:
             h.pop()
             h.pop()
+        # Clear notification marker when tab becomes active
+        boss = get_boss()
+        if boss and tab.id in boss._tab_notifications:
+            boss._tab_notifications.discard(tab.id)
+            # Refresh tab bar to remove notification icon
+            self.mark_tab_bar_dirty()
         return True
 
     def filtered_tabs(self, filter_expression: str) -> Iterator[Tab]:

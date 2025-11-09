@@ -1771,6 +1771,38 @@ def render_decoration(
 ) -> bytes: ...
 def os_window_is_invisible(os_window_id: int) -> bool: ...
 
+
+class FontCacheGroupStats(TypedDict):
+    id: int
+    font_size_pt: float
+    cell_width: int
+    cell_height: int
+    baseline: int
+    sprites_per_row: int
+    rows_in_use: int
+    layers_in_use: int
+    sprites_used: int
+    sprites_capacity: int
+    approx_bytes: int
+    approx_capacity_bytes: int
+    glyph_cache_entries: int
+    glyph_property_entries: int
+    fonts_count: int
+    fallback_fonts_count: int
+
+
+class FontCacheStats(TypedDict):
+    total_sprites: int
+    total_sprites_capacity: int
+    total_bytes: int
+    total_capacity_bytes: int
+    total_glyph_cache_entries: int
+    total_glyph_property_entries: int
+    font_groups: List[FontCacheGroupStats]
+
+def font_cache_stats() -> FontCacheStats: ...
+
+
 class MousePosition(TypedDict):
     cell_x: int
     cell_y: int

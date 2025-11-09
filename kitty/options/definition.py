@@ -55,6 +55,16 @@ opt('font_size', '11.0',
     long_text='Font size (in pts).'
     )
 
+opt('select_tab_sort_order', 'default',
+    choices=('default', 'title', 'cwd', 'app', 'mru', 'frequency', 'idle'),
+    long_text='Sort order for tabs in the select_tab overlay. Options: default (tab order), title (alphabetically by title), cwd (alphabetically by working directory), app (alphabetically by application name), mru (most recently used first), frequency (most frequently used first), idle (least idle/most recently active first).'
+    )
+
+opt('select_tab_max_title_length', '50',
+    option_type='positive_int',
+    long_text='Maximum length for tab titles in select_tab overlay. Titles longer than this will be truncated with ellipsis. Set to 0 for unlimited length.'
+    )
+
 opt('force_ltr', 'no',
     option_type='to_bool', ctype='bool',
     long_text='''

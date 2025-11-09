@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode"
@@ -190,6 +191,47 @@ func main(_ *cli.Command, o *Options, args []string) (rc int, err error) {
 	faint := fctx.SprintFunc("dim")
 	hint_style := fctx.SprintFunc(fmt.Sprintf("fg=%s bg=%s bold", o.HintsForegroundColor, o.HintsBackgroundColor))
 	text_style := fctx.SprintFunc(fmt.Sprintf("fg=%s bold", o.HintsTextColor))
+	selected_style := fctx.SprintFunc("bg=#444444 bold") // Highlight selected item with gray background
+
+	// Build ordered list of indices for arrow navigation (sorted by position in text, not by index)
+	// This respects the visual order of tabs as displayed (which follows select_tab_sort_order)
+	type indexWithPos struct {
+		idx int
+		pos int
+	}
+	indices_with_pos := make([]indexWithPos, 0, len(index_map))
+	for idx, m := range index_map {
+		indices_with_pos = append(indices_with_pos, indexWithPos{idx: idx, pos: m.Start})
+	}
+	sort.Slice(indices_with_pos, func(i, j int) bool {
+		return indices_with_pos[i].pos < indices_with_pos[j].pos
+	})
+	ordered_indices := make([]int, len(indices_with_pos))
+	for i, item := range indices_with_pos {
+		ordered_indices[i] = item.idx
+	}
+
+	// Track position in ordered list for arrow navigation
+	selected_position := -1
+	// Find initial selected position (line with ◄ marker)
+	for pos, idx := range ordered_indices {
+		m := index_map[idx]
+		mark_text := text[m.Start:m.End]
+		if strings.Contains(mark_text, "◄") {
+			selected_position = pos
+			break
+		}
+	}
+	if selected_position == -1 && len(ordered_indices) > 0 {
+		selected_position = 0 // Default to first item if no ◄ found
+	}
+
+	get_selected_index := func() int {
+		if selected_position >= 0 && selected_position < len(ordered_indices) {
+			return ordered_indices[selected_position]
+		}
+		return -1
+	}
 
 	highlight_mark := func(m *Mark, mark_text string) string {
 		hint := encode_hint(m.Index, alphabet)
@@ -226,7 +268,14 @@ func main(_ *cli.Command, o *Options, args []string) (rc int, err error) {
 			}
 			mark_text = mark_text[len(hint):]
 		}
-		ans := hint_style(hint) + text_style(mark_text)
+
+		// Apply selected highlighting if this is the keyboard-selected item
+		var ans string
+		if m.Index == get_selected_index() {
+			ans = selected_style(hint) + selected_style(mark_text)
+		} else {
+			ans = hint_style(hint) + text_style(mark_text)
+		}
 		return fmt.Sprintf("\x1b]8;;mark:%d\a%s\x1b]8;;\a", m.Index, ans)
 	}
 
@@ -262,6 +311,7 @@ func main(_ *cli.Command, o *Options, args []string) (rc int, err error) {
 		lp.SetCursorVisible(false)
 		lp.SetWindowTitle(window_title)
 		lp.AllowLineWrapping(false)
+		lp.MouseTrackingMode(loop.BUTTONS_ONLY_MOUSE_TRACKING)
 		draw_screen()
 		lp.SendOverlayReady()
 		return "", nil
@@ -274,6 +324,24 @@ func main(_ *cli.Command, o *Options, args []string) (rc int, err error) {
 		draw_screen()
 		return nil
 	}
+	// Handle right-click for closing tabs in select_tab
+	right_click_mode := false
+	lp.OnMouseEvent = func(ev *loop.MouseEvent) error {
+		if ev.Event_type == loop.MOUSE_RELEASE && ev.Buttons&loop.RIGHT_MOUSE_BUTTON != 0 {
+			// Right-click released - set flag, hyperlink click will follow
+			right_click_mode = true
+			return nil
+		}
+		if ev.Event_type == loop.MOUSE_PRESS && ev.Buttons&loop.RIGHT_MOUSE_BUTTON != 0 {
+			// Right-click pressed - set flag for close action
+			right_click_mode = true
+		} else if ev.Event_type == loop.MOUSE_PRESS {
+			// Any other button pressed - clear flag
+			right_click_mode = false
+		}
+		return nil
+	}
+
 	lp.OnRCResponse = func(data []byte) error {
 		var r struct {
 			Type string
@@ -284,7 +352,17 @@ func main(_ *cli.Command, o *Options, args []string) (rc int, err error) {
 		}
 		if r.Type == "mark_activated" {
 			if m, ok := index_map[r.Mark]; ok {
-				chosen = append(chosen, m)
+				if right_click_mode {
+					// Right-click on hyperlink - signal close action
+					// Use negative index to indicate close instead of select
+					m_copy := *m
+					m_copy.Index = -m.Index - 1 // Make negative and offset by 1 to differentiate from -0
+					chosen = append(chosen, &m_copy)
+					right_click_mode = false
+				} else {
+					// Regular left-click
+					chosen = append(chosen, m)
+				}
 				if o.Multiple {
 					ignore_mark_indices.Add(m.Index)
 					reset()
@@ -302,7 +380,25 @@ func main(_ *cli.Command, o *Options, args []string) (rc int, err error) {
 		changed := false
 		for _, ch := range text {
 			if strings.ContainsRune(alphabet, ch) {
-				current_input += string(ch)
+				test_input := current_input + string(ch)
+				// Check if this input would match any valid hint
+				has_match := false
+				for idx := range index_map {
+					if eh := encode_hint(idx, alphabet); strings.HasPrefix(eh, test_input) {
+						has_match = true
+						break
+					}
+				}
+				if !has_match {
+					// No valid hint starts with this input, quit like ESC
+					if o.Multiple {
+						lp.Quit(0)
+					} else {
+						lp.Quit(1)
+					}
+					return nil
+				}
+				current_input = test_input
 				changed = true
 			}
 		}
@@ -334,14 +430,110 @@ func main(_ *cli.Command, o *Options, args []string) (rc int, err error) {
 			ev.Handled = true
 			r := []rune(current_input)
 			if len(r) > 0 {
+				// If there's typed input, remove last character
 				r = r[:len(r)-1]
 				current_input = string(r)
 				current_text = ""
+				draw_screen()
+			} else {
+				// If no typed input, close selected tab
+				idx := get_selected_index()
+				if idx >= 0 {
+					if m := index_map[idx]; m != nil {
+						// Mark this as a close action
+						m_copy := *m
+						if m_copy.Groupdict == nil {
+							m_copy.Groupdict = make(map[string]any)
+						}
+						m_copy.Groupdict["close_action"] = true
+						chosen = append(chosen, &m_copy)
+						lp.Quit(0)
+					}
+				}
 			}
-			draw_screen()
+		} else if ev.MatchesPressOrRepeat("down") || ev.MatchesPressOrRepeat("tab") {
+			ev.Handled = true
+			// Move selection down (next item)
+			if len(ordered_indices) > 0 {
+				selected_position++
+				if selected_position >= len(ordered_indices) {
+					selected_position = 0 // Wrap to first
+				}
+				current_text = ""
+				draw_screen()
+			}
+		} else if ev.MatchesPressOrRepeat("up") || ev.MatchesPressOrRepeat("shift+tab") {
+			ev.Handled = true
+			// Move selection up (previous item)
+			if len(ordered_indices) > 0 {
+				selected_position--
+				if selected_position < 0 {
+					selected_position = len(ordered_indices) - 1 // Wrap to last
+				}
+				current_text = ""
+				draw_screen()
+			}
+		} else if ev.MatchesPressOrRepeat("page_down") {
+			ev.Handled = true
+			// Jump down 3 items
+			if len(ordered_indices) > 0 {
+				selected_position += 3
+				if selected_position >= len(ordered_indices) {
+					selected_position = len(ordered_indices) - 1 // Stop at last
+				}
+				current_text = ""
+				draw_screen()
+			}
+		} else if ev.MatchesPressOrRepeat("page_up") {
+			ev.Handled = true
+			// Jump up 3 items
+			if len(ordered_indices) > 0 {
+				selected_position -= 3
+				if selected_position < 0 {
+					selected_position = 0 // Stop at first
+				}
+				current_text = ""
+				draw_screen()
+			}
+		} else if ev.MatchesPressOrRepeat("home") {
+			ev.Handled = true
+			// Jump to first item
+			if len(ordered_indices) > 0 {
+				selected_position = 0
+				current_text = ""
+				draw_screen()
+			}
+		} else if ev.MatchesPressOrRepeat("end") {
+			ev.Handled = true
+			// Jump to last item
+			if len(ordered_indices) > 0 {
+				selected_position = len(ordered_indices) - 1
+				current_text = ""
+				draw_screen()
+			}
+		} else if ev.MatchesPressOrRepeat("delete") {
+			ev.Handled = true
+			// Clear any typed hint input first
+			current_input = ""
+			current_text = ""
+			// Close currently selected tab (the one highlighted with arrow keys)
+			idx := get_selected_index()
+			if idx >= 0 {
+				if m := index_map[idx]; m != nil {
+					// Mark this as a close action by adding a flag to groupdict
+					m_copy := *m
+					if m_copy.Groupdict == nil {
+						m_copy.Groupdict = make(map[string]any)
+					}
+					m_copy.Groupdict["close_action"] = true
+					chosen = append(chosen, &m_copy)
+					lp.Quit(0)
+				}
+			}
 		} else if ev.MatchesPressOrRepeat("enter") || ev.MatchesPressOrRepeat("space") {
 			ev.Handled = true
 			if current_input != "" {
+				// User typed a hint, use that
 				idx := decode_hint(current_input, alphabet)
 				if m := index_map[idx]; m != nil {
 					chosen = append(chosen, m)
@@ -356,6 +548,21 @@ func main(_ *cli.Command, o *Options, args []string) (rc int, err error) {
 					current_input = ""
 					current_text = ""
 					draw_screen()
+				}
+			} else {
+				// No hint typed, use keyboard selection
+				idx := get_selected_index()
+				if idx >= 0 {
+					if m := index_map[idx]; m != nil {
+						chosen = append(chosen, m)
+						ignore_mark_indices.Add(idx)
+						if o.Multiple {
+							reset()
+							draw_screen()
+						} else {
+							lp.Quit(0)
+						}
+					}
 				}
 			}
 		} else if ev.MatchesPressOrRepeat("esc") {

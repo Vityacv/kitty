@@ -92,6 +92,12 @@ find_or_create_sprite_position(
 #undef scratch
 }
 
+size_t
+sprite_position_hash_table_size(SPRITE_POSITION_MAP_HANDLE map_) {
+    const HashTable *ht = (const HashTable*)map_;
+    return ht ? vt_size(&ht->table) : 0u;
+}
+
 void
 free_sprite_position_hash_table(SPRITE_POSITION_MAP_HANDLE *map) {
     HashTable **mapref = (HashTable**)map;
@@ -129,6 +135,12 @@ bool
 set_glyph_properties(GLYPH_PROPERTIES_MAP_HANDLE map_, glyph_index glyph, GlyphProperties val) {
     glyph_props_map *map = (glyph_props_map*)map_;
     return !vt_is_end(vt_insert(map, glyph, val));
+}
+
+size_t
+glyph_properties_hash_table_size(GLYPH_PROPERTIES_MAP_HANDLE map_) {
+    const glyph_props_map *map = (const glyph_props_map*)map_;
+    return map ? vt_size(map) : 0u;
 }
 
 

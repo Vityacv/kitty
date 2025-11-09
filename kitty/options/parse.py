@@ -1262,6 +1262,17 @@ class Parser:
     def select_by_word_characters_forward(self, val: str, ans: dict[str, typing.Any]) -> None:
         ans['select_by_word_characters_forward'] = str(val)
 
+    def select_tab_max_title_length(self, val: str, ans: dict[str, typing.Any]) -> None:
+        ans['select_tab_max_title_length'] = positive_int(val)
+
+    def select_tab_sort_order(self, val: str, ans: dict[str, typing.Any]) -> None:
+        val = val.lower()
+        if val not in self.choices_for_select_tab_sort_order:
+            raise ValueError(f"The value {val} is not a valid choice for select_tab_sort_order")
+        ans["select_tab_sort_order"] = val
+
+    choices_for_select_tab_sort_order = frozenset(('default', 'title', 'cwd', 'app', 'mru', 'frequency', 'idle'))
+
     def selection_background(self, val: str, ans: dict[str, typing.Any]) -> None:
         ans['selection_background'] = to_color_or_none(val)
 

@@ -2385,6 +2385,79 @@ pyrender_box_char(PyObject *self UNUSED, PyObject *args) {
     return Py_NewRef(ans);
 }
 
+static PyObject*
+font_cache_stats(PyObject *self UNUSED, PyObject *args UNUSED) {
+    PyObject *groups = PyList_New((Py_ssize_t)num_font_groups);
+    if (!groups) return NULL;
+    unsigned long long total_sprites = 0, total_capacity_sprites = 0;
+    unsigned long long total_bytes = 0, total_capacity_bytes = 0;
+    unsigned long long total_glyph_entries = 0, total_glyph_props = 0;
+
+    for (size_t i = 0; i < num_font_groups; i++) {
+        FontGroup *fg = font_groups + i;
+        const unsigned int sprites_per_row = fg->sprite_tracker.xnum;
+        const unsigned int rows_in_use = fg->sprite_tracker.ynum ? fg->sprite_tracker.ynum : 1u;
+        const unsigned int layers_in_use = fg->sprite_tracker.z + 1u;
+        const uint32_t sprites_used = current_sprite_index(&fg->sprite_tracker);
+        const unsigned long long sprites_capacity = (unsigned long long)sprites_per_row * rows_in_use * layers_in_use;
+        const size_t per_sprite_px = (size_t)fg->fcm.cell_width * (fg->fcm.cell_height + 1u);
+        const unsigned long long approx_bytes = (unsigned long long)per_sprite_px * sprites_used * sizeof(pixel);
+        const unsigned long long approx_capacity_bytes = (unsigned long long)per_sprite_px * sprites_capacity * sizeof(pixel);
+        unsigned long long glyph_entries = 0, glyph_props = 0;
+        for (size_t j = 0; j < fg->fonts_count; j++) {
+            Font *font = fg->fonts + j;
+            glyph_entries += sprite_position_hash_table_size(font->sprite_position_hash_table);
+            glyph_props += glyph_properties_hash_table_size(font->glyph_properties_hash_table);
+        }
+        total_sprites += sprites_used;
+        total_capacity_sprites += sprites_capacity;
+        total_bytes += approx_bytes;
+        total_capacity_bytes += approx_capacity_bytes;
+        total_glyph_entries += glyph_entries;
+        total_glyph_props += glyph_props;
+        PyObject *group = Py_BuildValue(
+            "{sK,sd,sI,sI,sI,sI,sI,sI,sK,sK,sK,sK,sK,sK,sI,sI}",
+            "id", (unsigned long long)fg->id,
+            "font_size_pt", fg->font_sz_in_pts,
+            "cell_width", (unsigned int)fg->fcm.cell_width,
+            "cell_height", (unsigned int)fg->fcm.cell_height,
+            "baseline", (unsigned int)fg->fcm.baseline,
+            "sprites_per_row", sprites_per_row,
+            "rows_in_use", rows_in_use,
+            "layers_in_use", layers_in_use,
+            "sprites_used", (unsigned long long)sprites_used,
+            "sprites_capacity", sprites_capacity,
+            "approx_bytes", approx_bytes,
+            "approx_capacity_bytes", approx_capacity_bytes,
+            "glyph_cache_entries", glyph_entries,
+            "glyph_property_entries", glyph_props,
+            "fonts_count", (unsigned int)fg->fonts_count,
+            "fallback_fonts_count", (unsigned int)fg->fallback_fonts_count
+        );
+        if (!group) {
+            Py_DECREF(groups);
+            return NULL;
+        }
+        PyList_SET_ITEM(groups, (Py_ssize_t)i, group);
+    }
+    PyObject *ans = Py_BuildValue(
+        "{sK,sK,sK,sK,sK,sK,sO}",
+        "total_sprites", total_sprites,
+        "total_sprites_capacity", total_capacity_sprites,
+        "total_bytes", total_bytes,
+        "total_capacity_bytes", total_capacity_bytes,
+        "total_glyph_cache_entries", total_glyph_entries,
+        "total_glyph_property_entries", total_glyph_props,
+        "font_groups", groups
+    );
+    if (!ans) {
+        Py_DECREF(groups);
+        return NULL;
+    }
+    Py_DECREF(groups);
+    return ans;
+}
+
 static PyMethodDef module_methods[] = {
     METHODB(set_font_data, METH_VARARGS),
     METHODB(sprite_idx_to_pos, METH_VARARGS),
@@ -2400,6 +2473,7 @@ static PyMethodDef module_methods[] = {
     METHODB(current_fonts, METH_VARARGS),
     METHODB(test_render_line, METH_VARARGS),
     METHODB(get_fallback_font, METH_VARARGS),
+    METHODB(font_cache_stats, METH_NOARGS),
     {"specialize_font_descriptor", (PyCFunction)pyspecialize_font_descriptor, METH_VARARGS, ""},
     {"render_box_char", (PyCFunction)pyrender_box_char, METH_VARARGS, ""},
     {NULL, NULL, 0, NULL}        /* Sentinel */

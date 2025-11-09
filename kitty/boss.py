@@ -388,6 +388,14 @@ class Boss:
         self.clipboard_buffers: dict[str, str] = {}
         self.update_check_process: Optional['PopenType[bytes]'] = None
         self.window_id_map: WeakValueDictionary[int, Window] = WeakValueDictionary()
+        self._cached_app_icons: dict[str, str] | None = None
+        self._cached_app_icons_lower: dict[str, str] | None = None
+        self._cached_title_match_processes: list[str] | None = None
+        self._select_tab_window: Window | None = None
+        self._select_tab_cache: dict[int, tuple[str, str]] = {}  # tab_id -> (exe, cwd)
+        self._tab_access_times: dict[int, float] = {}  # tab_id -> last access timestamp
+        self._tab_access_counts: dict[int, int] = {}  # tab_id -> access count
+        self._tab_notifications: set[int] = set()  # tab IDs with pending notifications
         self.color_settings_at_startup: dict[str, Color | None] = {
                 k: opts[k] for k in opts if isinstance(opts[k], Color) or k in nullable_colors}
         self.current_visual_select: VisualSelect | None = None
@@ -2511,7 +2519,20 @@ class Boss:
     def set_active_tab(self, tab: Tab) -> bool:
         tm = self.active_tab_manager
         if tm is not None:
-            return tm.set_active_tab(tab)
+            result = tm.set_active_tab(tab)
+            if result:
+                # Track access time and count for sorting
+                from kitty.fast_data_types import monotonic
+                self._tab_access_times[tab.id] = monotonic()
+                self._tab_access_counts[tab.id] = self._tab_access_counts.get(tab.id, 0) + 1
+                # Clear notification marker when tab becomes active
+                if tab.id in self._tab_notifications:
+                    self._tab_notifications.discard(tab.id)
+                    # Refresh tab bar to remove notification icon
+                    tab.mark_tab_bar_dirty()
+                    for tm_iter in self.all_tab_managers:
+                        tm_iter.mark_tab_bar_dirty()
+            return result
         return False
 
     @ac('tab', 'Make the next tab active')
@@ -2527,6 +2548,16 @@ class Boss:
             tm.next_tab(-1)
 
     prev_tab = previous_tab
+
+    @ac('tab', 'Mark the current tab with a notification indicator')
+    def mark_tab_done(self) -> None:
+        """Mark the current tab with a notification indicator (e.g., when a long-running command completes)"""
+        w = self.window_for_dispatch or self.active_window
+        if w:
+            tab = w.tabref()
+            if tab:
+                self._tab_notifications.add(tab.id)
+                tab.mark_tab_bar_dirty()
 
     def process_stdin_source(
         self, window: Window | None = None,
@@ -2937,6 +2968,10 @@ class Boss:
         clear_caches()
         from .guess_mime_type import clear_mime_cache
         clear_mime_cache()
+        # Clear cached app icons on config reload
+        self._cached_app_icons = None
+        self._cached_app_icons_lower = None
+        self._cached_title_match_processes = None
         store_effective_config()
         from .tab_bar import clear_caches
         clear_caches()
@@ -3106,7 +3141,11 @@ class Boss:
 
         def done(data: dict[str, Any], target_window_id: int, self: Boss) -> None:
             nonlocal ans
-            ans = idx_map[int(data['groupdicts'][0]['index'])]
+            groupdict = data['groupdicts'][0]
+            ans = idx_map[int(groupdict['index'])]
+            # Check if this is a close action (Delete key pressed)
+            if groupdict.get('close_action'):
+                ans = -ans  # Mark as negative to signal close
 
         def done2(target_window_id: int, self: Boss) -> None:
             callback(ans)
@@ -3145,22 +3184,233 @@ class Boss:
 
     @ac('tab', 'Interactively select a tab to switch to')
     def select_tab(self) -> None:
+        def refresh_cache_async() -> None:
+            """Refresh cache in background for next instant open"""
+            for t in self.all_tabs:
+                exe = t.get_exe_of_active_window() or ''
+                cwd = t.get_cwd_of_active_window() or ''
+                self._select_tab_cache[t.id] = (exe, cwd)
+
+        # Toggle: if already open, close it
+        if self._select_tab_window is not None:
+            # Check if window still exists
+            if self._select_tab_window in self.window_id_map.values():
+                self.mark_window_for_close(self._select_tab_window)
+                self._select_tab_window = None
+                refresh_cache_async()  # Refresh for next open
+                return
+            else:
+                # Window was already closed, clear the reference
+                self._select_tab_window = None
+                refresh_cache_async()
 
         def chosen(ans: None | str | int) -> None:
+            self._select_tab_window = None  # Clear on close/selection
             if isinstance(ans, int):
-                for tab in self.all_tabs:
-                    if tab.id == ans:
-                        self.set_active_tab(tab)
+                # Check if this is a close action (negative tab ID from Delete key)
+                if ans < 0:
+                    # Negative indicates close action
+                    actual_id = -ans
+                    for tab in self.all_tabs:
+                        if tab.id == actual_id:
+                            self.close_tab_no_confirm(tab)
+                            self._select_tab_cache.pop(actual_id, None)
+                            break
+                    # Reopen immediately for bulk deletion
+                    refresh_cache_async()
+                    self.select_tab()
+                else:
+                    # Positive - regular tab selection
+                    refresh_cache_async()  # Refresh cache for next instant open
+                    for tab in self.all_tabs:
+                        if tab.id == ans:
+                            self.set_active_tab(tab)
+                            break
+            else:
+                refresh_cache_async()  # Refresh cache for next instant open
+
+        def format_idle_time(seconds: float) -> str:
+            """Format idle time in human-readable form"""
+            if seconds < 60:
+                return f"{int(seconds)}s"
+            elif seconds < 3600:
+                return f"{int(seconds / 60)}m"
+            elif seconds < 86400:
+                return f"{int(seconds / 3600)}h"
+            else:
+                return f"{int(seconds / 86400)}d"
+
+        def load_app_icons() -> tuple[dict[str, str], dict[str, str], list[str]]:
+            # Use cached icons if available
+            if self._cached_app_icons is not None and self._cached_app_icons_lower is not None and self._cached_title_match_processes is not None:
+                return self._cached_app_icons, self._cached_app_icons_lower, self._cached_title_match_processes
+
+            # Load and cache icons
+            icons_file = os.path.join(config_dir, 'app_icons.json')
+            try:
+                with open(icons_file, 'r') as f:
+                    data = json.load(f)
+                    # Extract config section
+                    config = data.pop('_config', {})
+                    title_match_processes = config.get('title_match_for_processes', ['ssh', 'kitten'])
+                    self._cached_app_icons = data
+                    # Pre-compute lowercase keys for O(1) lookups
+                    self._cached_app_icons_lower = {k.lower(): v for k, v in data.items()}
+                    self._cached_title_match_processes = title_match_processes
+                    return data, self._cached_app_icons_lower, title_match_processes
+            except Exception:
+                self._cached_app_icons = {}
+                self._cached_app_icons_lower = {}
+                self._cached_title_match_processes = ['ssh', 'kitten']
+                return {}, {}, self._cached_title_match_processes
+
+
+        def get_icon(tab: Tab, icons_lower: dict[str, str], icons_orig: dict[str, str], title_match_processes: list[str], exe: str = '') -> str:
+            exe_name = os.path.basename(exe).lower()
+
+            # Try matching process name first (but skip processes that use title matching)
+            should_use_title_match = any(proc in exe_name for proc in title_match_processes)
+            if not should_use_title_match:
+                # Try exact match first (O(1) instead of O(n))
+                if exe_name in icons_lower:
+                    return icons_lower[exe_name] + ' '
+                # Fall back to substring matching only if no exact match
+                for app, icon in icons_lower.items():
+                    if app in exe_name:  # already lowercase
+                        return icon + ' '
+                # Not a title-match process and no icon found, return default
+                return icons_lower.get('default', '') + ' ' if 'default' in icons_lower else ''
+
+            # Only check foreground processes if the exe is actually in title_match_processes
+            # This optimization avoids expensive /proc reads for non-SSH tabs
+            active_window = tab.active_window
+            should_match_title = False
+            if active_window:
+                try:
+                    fg_procs = active_window.child.foreground_processes
+                    for proc in fg_procs:
+                        cmdline = proc['cmdline']
+                        if cmdline:
+                            proc_name = os.path.basename(cmdline[0]).lower()
+                            if any(match_proc in proc_name for match_proc in title_match_processes):
+                                should_match_title = True
+                                break
+                except Exception:
+                    pass
+
+            if should_match_title:
+                title = (tab.name or tab.title).lower()
+                # Try exact match first, then substring (using lowercase dict)
+                for app, icon in icons_lower.items():
+                    if app == title or app in title:
+                        return icon + ' '
+
+            return icons_lower.get('default', '') + ' ' if 'default' in icons_lower else ''
+
+        # Collect all tab info first for alignment
+        opts = get_options()
+        tab_infos = []
+        icons_orig, icons_lower, title_match_processes = load_app_icons()
+        exe_cache = {}  # Cache exe results to avoid duplicate /proc reads
+
+        for t in self.all_tabs:
+            # Use cache if available, otherwise read from /proc
+            cached = self._select_tab_cache.get(t.id)
+            if cached:
+                exe, cwd = cached
+            else:
+                exe = t.get_exe_of_active_window() or ''
+                cwd = t.get_cwd_of_active_window() or ''
+                self._select_tab_cache[t.id] = (exe, cwd)
+
+            # Skip tabs with failed cwd reads (showing /proc/*/cwd pattern)
+            if cwd and '/proc/' in cwd and '/cwd' in cwd:
+                continue
+
+            exe_cache[t.id] = exe
+            icon = get_icon(t, icons_lower, icons_orig, title_match_processes, exe)
+            title = t.name or t.title
+            tab_infos.append((t, icon, title, cwd))
+
+        # print(f"Tab collection: {(monotonic() - start) * 1000:.2f}ms", flush=True)
+
+        # Sort tabs based on configuration
+        sort_order = opts.select_tab_sort_order
+        if sort_order == 'title':
+            tab_infos.sort(key=lambda x: x[2].lower())  # Sort by title
+        elif sort_order == 'cwd':
+            tab_infos.sort(key=lambda x: x[3].lower())  # Sort by cwd
+        elif sort_order == 'app':
+            # Use cached exe instead of reading /proc again
+            tab_infos.sort(key=lambda x: os.path.basename(exe_cache.get(x[0].id, '')).lower())
+        elif sort_order == 'mru':
+            # Sort by most recently used (highest timestamp first)
+            tab_infos.sort(key=lambda x: self._tab_access_times.get(x[0].id, 0), reverse=True)
+        elif sort_order == 'frequency':
+            # Sort by most frequently used (highest count first)
+            tab_infos.sort(key=lambda x: self._tab_access_counts.get(x[0].id, 0), reverse=True)
+        elif sort_order == 'idle':
+            # Sort by least idle (most recently active first, highest timestamp first)
+            tab_infos.sort(key=lambda x: self._tab_access_times.get(x[0].id, 0), reverse=True)
+
+        # Truncate titles if needed
+        max_title_len = opts.select_tab_max_title_length
+        if max_title_len > 0:
+            truncated_tab_infos = []
+            for t, icon, title, cwd in tab_infos:
+                if len(title) > max_title_len:
+                    title = title[:max_title_len - 3] + '...'
+                truncated_tab_infos.append((t, icon, title, cwd))
+            tab_infos = truncated_tab_infos
+
+        # Calculate max widths for alignment
+        # Account for icon width (2 chars: icon + space)
+        max_icon_and_title_len = max(len(info[2]) + (2 if info[1] else 0) for info in tab_infos) if tab_infos else 0
+
+        # Calculate max idle time width for alignment
+        from kitty.fast_data_types import monotonic
+        max_idle_len = 0
+        for t, _, _, _ in tab_infos:
+            last_access = self._tab_access_times.get(t.id, 0)
+            idle_seconds = monotonic() - last_access if last_access > 0 else 0
+            idle_str = format_idle_time(idle_seconds)
+            max_idle_len = max(max_idle_len, len(idle_str))
 
         def format_tab_title(tab: Tab) -> str:
-            w = 'windows' if tab.num_window_groups > 1 else 'window'
-            return f'{tab.name or tab.title} [{tab.num_window_groups} {w}]'
+            # Find the matching tab info
+            for t, icon, title, cwd in tab_infos:
+                if t.id == tab.id:
+                    # Calculate padding needed after icon+title
+                    current_len = len(title) + (2 if icon else 0)
+                    padding = max_icon_and_title_len - current_len
+
+                    # Calculate idle time
+                    last_access = self._tab_access_times.get(tab.id, 0)
+                    idle_seconds = monotonic() - last_access if last_access > 0 else 0
+                    idle_str = format_idle_time(idle_seconds)
+                    idle_padding = max_idle_len - len(idle_str)
+
+                    # Dim tabs idle for more than 1 day
+                    dim_start = '\033[90m' if idle_seconds > 86400 else ''
+                    dim_end = '\033[0m' if idle_seconds > 86400 else ''
+
+                    # Add notification indicator for inactive tabs with pending notifications
+                    has_notification = tab.id in self._tab_notifications
+                    is_inactive = tab != self.active_tab
+                    notification_icon = '  ⚑' if has_notification and is_inactive else ''
+
+                    if cwd:
+                        return f'{dim_start}{icon}{title}{" " * padding}  │  {idle_str}{" " * idle_padding}  │  {cwd}{notification_icon}{dim_end}'
+                    else:
+                        return f'{dim_start}{icon}{title}  │  {idle_str}{notification_icon}{dim_end}'
+            return tab.name or tab.title
 
         w = self.window_for_dispatch or self.active_window
         ct = w.tabref() if w else None
-        self.choose_entry(
+
+        self._select_tab_window = self.choose_entry(
             'Choose a tab to switch to',
-            ((None, f'Current tab: {format_tab_title(t)}') if t is ct else (t.id, format_tab_title(t)) for t in self.all_tabs),
+            ((t.id, f'{format_tab_title(t)}  ◄') if t is ct else (t.id, format_tab_title(t)) for t, _, _, _ in tab_infos),
             chosen
         )
 

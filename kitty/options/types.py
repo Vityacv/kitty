@@ -28,6 +28,7 @@ choices_for_macos_show_window_title_in = typing.Literal['all', 'menubar', 'none'
 choices_for_placement_strategy = typing.Literal['top-left', 'top', 'top-right', 'left', 'center', 'right', 'bottom-left', 'bottom', 'bottom-right']
 choices_for_pointer_shape_when_grabbed = choices_for_default_pointer_shape
 choices_for_scrollbar = typing.Literal['scrolled', 'always', 'never', 'hovered', 'scrolled-and-hovered']
+choices_for_select_tab_sort_order = typing.Literal['default', 'title', 'cwd', 'app', 'mru', 'frequency', 'idle']
 choices_for_strip_trailing_spaces = typing.Literal['always', 'never', 'smart']
 choices_for_tab_bar_align = typing.Literal['left', 'center', 'right']
 choices_for_tab_bar_style = typing.Literal['fade', 'hidden', 'powerline', 'separator', 'slant', 'custom']
@@ -432,6 +433,8 @@ option_names = (
     'scrollbar_width',
     'select_by_word_characters',
     'select_by_word_characters_forward',
+    'select_tab_max_title_length',
+    'select_tab_sort_order',
     'selection_background',
     'selection_foreground',
     'shell',
@@ -620,6 +623,8 @@ class Options:
     scrollbar_width: float = 0.5
     select_by_word_characters: str = '@-./_~?&=%+#'
     select_by_word_characters_forward: str = ''
+    select_tab_max_title_length: int = 50
+    select_tab_sort_order: choices_for_select_tab_sort_order = 'default'
     selection_background: kitty.fast_data_types.Color | None = Color(255, 250, 205)
     selection_foreground: kitty.fast_data_types.Color | None = Color(0, 0, 0)
     shell: str = '.'

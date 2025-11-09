@@ -7,6 +7,7 @@
 #pragma once
 
 #include "data-types.h"
+#include <stddef.h>
 
 typedef union SpritePosition {
     struct {
@@ -27,6 +28,9 @@ void
 free_sprite_position_hash_table(SPRITE_POSITION_MAP_HANDLE *handle);
 SpritePosition*
 find_or_create_sprite_position(SPRITE_POSITION_MAP_HANDLE map, glyph_index *glyphs, glyph_index count, glyph_index ligature_index, glyph_index cell_count, uint8_t scale, uint8_t subscale, uint8_t multicell_y, uint8_t vertical_align, bool *created);
+
+size_t
+sprite_position_hash_table_size(SPRITE_POSITION_MAP_HANDLE map);
 
 
 typedef union GlyphProperties {
@@ -49,3 +53,6 @@ GlyphProperties
 find_glyph_properties(GLYPH_PROPERTIES_MAP_HANDLE map, glyph_index glyph);
 bool
 set_glyph_properties(GLYPH_PROPERTIES_MAP_HANDLE map, glyph_index glyph, GlyphProperties val);
+
+size_t
+glyph_properties_hash_table_size(GLYPH_PROPERTIES_MAP_HANDLE map);
